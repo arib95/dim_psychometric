@@ -10,7 +10,17 @@ default_run_cfg <- list(
   bam_threads = "all_but_one",
   ncores_par = "all_but_one",
   omp_threads = 1L,
-  blas_threads = 1L
+  blas_threads = 1L,
+  optimisation_subsample_n = NULL,
+  optimisation_w_min = NULL,
+  optimisation_multi_runs = NULL,
+  optimisation_multi_min_prop = NULL,
+  optimisation_step_grid = NULL,
+  optimisation_batch_k = NULL,
+  optimisation_batch_factor = NULL,
+  optimisation_max_iter = NULL,
+  optimisation_eval_per_iter = NULL,
+  run_residual_diagnostics = FALSE
 )
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
@@ -71,10 +81,21 @@ run_dimension_variant_main <- function(cfg = default_run_cfg) {
   source(setup_path, chdir = TRUE, local = TRUE)
 
   OUTPUTS_DIR <- out_dir
+  METHOD_ROOT_DIR <- root_dir
   WEIGHTING_MODE <- cfg$weighting_mode
   BASE_DECOMP_METHOD <- cfg$decomp_method
   PSY_CSV <- psych_csv
   DIAG_CSV <- diag_csv
+  if (!is.null(cfg$optimisation_subsample_n)) N_ROWS_SUB <- as.integer(cfg$optimisation_subsample_n)
+  if (!is.null(cfg$optimisation_w_min)) W_MIN <- as.numeric(cfg$optimisation_w_min)
+  if (!is.null(cfg$optimisation_multi_runs)) GOWER_MULTI_RUNS <- as.integer(cfg$optimisation_multi_runs)
+  if (!is.null(cfg$optimisation_multi_min_prop)) GOWER_MULTI_MIN_PROP <- as.numeric(cfg$optimisation_multi_min_prop)
+  if (!is.null(cfg$optimisation_step_grid)) W_STEP_GRID <- as.numeric(cfg$optimisation_step_grid)
+  if (!is.null(cfg$optimisation_batch_k)) W_BATCH_K <- as.integer(cfg$optimisation_batch_k)
+  if (!is.null(cfg$optimisation_batch_factor)) W_BATCH_FACTOR <- as.numeric(cfg$optimisation_batch_factor)
+  if (!is.null(cfg$optimisation_max_iter)) W_MAX_ITERS <- as.integer(cfg$optimisation_max_iter)
+  if (!is.null(cfg$optimisation_eval_per_iter)) W_EVAL_PER_ITER <- as.integer(cfg$optimisation_eval_per_iter)
+  RUN_RESIDUAL_DIAGNOSTICS <- isTRUE(cfg$run_residual_diagnostics)
   dir.create(OUTPUTS_DIR, recursive = TRUE, showWarnings = FALSE)
 
   old_wd <- getwd()
@@ -82,10 +103,13 @@ run_dimension_variant_main <- function(cfg = default_run_cfg) {
   setwd(OUTPUTS_DIR)
 
   message(sprintf(
-    "[run_dimension_variant] out=%s | weighting=%s | decomp=%s | bam_threads=%d | workers=%d",
+    "[run_dimension_variant] out=%s | weighting=%s | decomp=%s | n_sub=%d | diag_n=%d | residuals=%s | bam_threads=%d | workers=%d",
     OUTPUTS_DIR,
     WEIGHTING_MODE,
     BASE_DECOMP_METHOD,
+    N_ROWS_SUB,
+    N_ROWS_SUB,
+    RUN_RESIDUAL_DIAGNOSTICS,
     BAM_THREADS,
     NWORKERS
   ))

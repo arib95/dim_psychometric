@@ -7,7 +7,12 @@
 # ==============================================================================
 
 # --- Data Preparation for Gower Distance ---
-prep_X_for_gower <- function(X, rare_prop = 0.01, do_jitter = TRUE, seed = NULL) {
+prep_X_for_gower <- function(X, rare_prop = 0.01, do_jitter = TRUE, seed = NULL,
+                             treat_ordinals_as_nominal = get0(
+                               "TREAT_ORDINALS_AS_NOMINAL",
+                               ifnotfound = FALSE,
+                               inherits = TRUE
+                             )) {
   X1 <- as.data.frame(X, check.names = TRUE, stringsAsFactors = FALSE)
   
   # Ensure character cols are factors
@@ -29,7 +34,7 @@ prep_X_for_gower <- function(X, rare_prop = 0.01, do_jitter = TRUE, seed = NULL)
   
   X1 <- as.data.frame(lapply(X1, drop_rare, prop = rare_prop), stringsAsFactors = FALSE)
 
-  if (isTRUE(TREAT_ORDINALS_AS_NOMINAL)) {
+  if (isTRUE(treat_ordinals_as_nominal)) {
     X1 <- as.data.frame(lapply(X1, function(v) {
       if (is.ordered(v)) factor(v, levels = levels(v), ordered = FALSE, exclude = NULL) else v
     }), stringsAsFactors = FALSE)
@@ -59,7 +64,7 @@ prep_X_for_gower <- function(X, rare_prop = 0.01, do_jitter = TRUE, seed = NULL)
   
   # Internal helper to detect binary
   .is_binary <- function(x) length(unique(na.omit(x))) == 2
-  bin_cols <- if (isTRUE(TREAT_ORDINALS_AS_NOMINAL)) {
+  bin_cols <- if (isTRUE(treat_ordinals_as_nominal)) {
     character(0)
   } else {
     fac_cols[vapply(X1[fac_cols], .is_binary, logical(1))]
@@ -342,22 +347,44 @@ lb_mle_id <- function(Dm, k_lo = 5, k_hi = 15) {
 
 # --- Weight Optimization Helpers ---
 
-make_NS_cache <- function(Xdf, type = NULL) {
-  p <- ncol(Xdf)
-  N_list <- vector("list", p)
-  S_list <- vector("list", p)
-  
-  for (j in seq_len(p)) {
-    w1 <- rep(0, p)
-    w1[j] <- 1
-    Dj <- cluster::daisy(Xdf, metric = "gower", type = type, weights = w1)
-    vD <- as.numeric(Dj)
-    ok <- as.numeric(is.finite(vD))
-    vD[!is.finite(vD)] <- 0
-    N_list[[j]] <- vD
-    S_list[[j]] <- ok
+source_gower_optimizer_core <- function() {
+  root_hint <- get0("METHOD_ROOT_DIR", ifnotfound = NA_character_, inherits = TRUE)
+  main_hint <- get0("main_path", ifnotfound = NA_character_, inherits = TRUE)
+  candidates <- unique(stats::na.omit(c(
+    if (is.character(root_hint) && length(root_hint) && !is.na(root_hint[[1]]) && nzchar(root_hint[[1]])) {
+      file.path(root_hint[[1]], "tools", "gower_optimizer_core.R")
+    } else {
+      NA_character_
+    },
+    if (is.character(main_hint) && length(main_hint) && nzchar(main_hint[[1]])) {
+      file.path(dirname(main_hint[[1]]), "tools", "gower_optimizer_core.R")
+    } else {
+      NA_character_
+    },
+    file.path(getwd(), "tools", "gower_optimizer_core.R"),
+    file.path(dirname(getwd()), "tools", "gower_optimizer_core.R")
+  )))
+  core_path <- candidates[file.exists(candidates)][1]
+  if (!length(core_path) || is.na(core_path)) {
+    stop("Cannot find tools/gower_optimizer_core.R")
   }
-  list(N = N_list, S = S_list, n = nrow(Xdf))
+
+  core_env <- new.env(parent = globalenv())
+  source(core_path, local = core_env, chdir = FALSE)
+  for (nm in ls(core_env, all.names = TRUE)) {
+    assign(nm, get(nm, envir = core_env), envir = parent.frame())
+  }
+  invisible(core_path)
+}
+
+source_gower_optimizer_core()
+
+is_nominal_gower_fast_path <- gower_opt_is_nominal_fast_path
+nominal_codes <- gower_opt_nominal_codes
+make_nominal_mismatch_cache <- gower_opt_make_nominal_mismatch_cache
+
+make_NS_cache <- function(Xdf, type = NULL) {
+  gower_opt_make_ns_cache(Xdf, type = type)
 }
 
 optimise_gower_weights_constrained <- function(X, init_weights, allow_update,
@@ -375,23 +402,24 @@ optimise_gower_weights_constrained <- function(X, init_weights, allow_update,
                                                base_seed = SEED_GLOBAL,
                                                verbose = TRUE,
                                                plot_progress = TRUE,
-                                               progress_fun = NULL) {
+                                               progress_fun = NULL,
+                                               treat_ordinals_as_nominal = get0(
+                                                 "TREAT_ORDINALS_AS_NOMINAL",
+                                                 ifnotfound = FALSE,
+                                                 inherits = TRUE
+                                               )) {
   seed_sub  <- .seed_from_key(base_seed, "optim::subsample_rows")
   seed_iter <- .seed_from_key(base_seed, "optim::iter_sampling")
   seed_prep <- seed_jitter
   
-  # Internal ID calc from numerator/denominator
-  calc_id_fast <- function(num, den, n_rows) {
-    Dvec <- num / pmax(den, .Machine$double.eps)
-    attr(Dvec, "Size")  <- n_rows
-    attr(Dvec, "Diag")  <- FALSE
-    attr(Dvec, "Upper") <- FALSE
-    class(Dvec) <- "dist"
-    twonn_id_from_dist(Dvec) 
-  }
-  
   # Prepare subset
-  px  <- prep_X_for_gower(X, rare_prop = RARE_LEVEL_MIN_PROP, do_jitter = TRUE, seed = seed_prep)
+  px  <- prep_X_for_gower(
+    X,
+    rare_prop = RARE_LEVEL_MIN_PROP,
+    do_jitter = TRUE,
+    seed = seed_prep,
+    treat_ordinals_as_nominal = treat_ordinals_as_nominal
+  )
   X0  <- px$X
   typ <- px$type
   
@@ -429,145 +457,37 @@ optimise_gower_weights_constrained <- function(X, init_weights, allow_update,
   allow_update <- allow_update[vars]
   w[!allow_update] <- pmax(w_min, w[!allow_update])
   
-  # Build cache
   cache <- make_NS_cache(Xs, type = typ)
-  
-  # Initialize State
-  num_cur <- Reduce(`+`, Map(`*`, cache$N, as.list(w)))
-  den_cur <- Reduce(`+`, Map(`*`, cache$S, as.list(w)))
-  
-  id0 <- calc_id_fast(num_cur, den_cur, n_sub)
-  hist <- data.frame(iter = 0L, ID = id0, changed = NA_character_, note = NA_character_)
-  
-  if (verbose) cat(sprintf("[optim] Start ID: %.3f | N_sub: %d | Mode: STOCHASTIC\n", id0, n_sub))
-  
   max_iter_eff <- if (is.null(max_iter) || !is.finite(max_iter)) 1000L else as.integer(max_iter)
-  
-  # Optimization Config
-  N_SAMPLE_PER_ITER <- 50 
-  step_grid <- sort(step_grid, decreasing = FALSE) 
-  hot_vars <- integer(0) # Track momentum
-  
-  id <- id0
-  
-  for (it in seq_len(max_iter_eff)) {
-    
-    can_all <- which(allow_update & (w > w_min + 1e-12))
-    if (!length(can_all)) break
-    
-    # 1. Stochastic Sampling: Keep hot vars, fill rest with randoms
-    n_rnd <- max(10, N_SAMPLE_PER_ITER - length(hot_vars))
-    rnd_vars <- .with_seed(
-      as.integer(seed_iter + it),
-      sample(can_all, min(length(can_all), n_rnd))
-    )
-    can_iter <- unique(c(hot_vars, rnd_vars))
-    
-    # 2. Evaluate Candidates (Greedy)
-    best_res <- list(id = Inf)
-    
-    for (j in can_iter) {
-      w_base <- w[j]
-      
-      for (factor in step_grid) {
-        w_new <- max(w_min, w_base * factor)
-        if (w_new >= w_base - 1e-12) next 
-        
-        delta <- w_new - w_base
-        val <- calc_id_fast(num_cur + delta * cache$N[[j]], 
-                            den_cur + delta * cache$S[[j]], n_sub)
-        
-        if (is.finite(val) && val < best_res$id) {
-          best_res <- list(id = val, j = j, w_new = w_new)
-        }
-      }
-    }
-    
-    # 3. Commit Best Move
-    changed <- FALSE
-    if (is.finite(best_res$id) && best_res$id < id - 1e-6) {
-      jbest <- best_res$j
-      wbest <- best_res$w_new
-      delta <- wbest - w[jbest]
-      
-      num_cur <- num_cur + delta * cache$N[[jbest]]
-      den_cur <- den_cur + delta * cache$S[[jbest]]
-      w[jbest] <- wbest
-      id <- best_res$id
-      changed <- TRUE
-      
-      # Update "Hot" list (Keep this var, drop oldest if too full)
-      hot_vars <- unique(c(jbest, hot_vars))
-      if (length(hot_vars) > 10) hot_vars <- head(hot_vars, 10)
-      
-      hist <- rbind(hist, data.frame(iter = it, ID = id, changed = vars[jbest], note = sprintf("%.3f", wbest)))
-      if (verbose) cat(sprintf("   iter %d: %s -> %.3f (ID: %.3f)\n", it, vars[jbest], wbest, id))
-      
-    } else {
-      # No improvement? Flush momentum or quit
-      if (length(hot_vars) > 0) {
-        hot_vars <- integer(0) 
-        if (verbose) cat("   [optim] Momentum lost, flushing hot vars.\n")
-      } else {
-        if (verbose) cat("[optim] No improvement in random subset.\n")
-        break
-      }
-    }
+  eval_per_iter_eff <- get0("W_EVAL_PER_ITER", ifnotfound = 50L, inherits = TRUE)
 
-    if (!is.null(progress_fun) && (it == 1L || it %% 10L == 0L)) {
-      progress_fun(list(iter = it, ID = id))
-    }
-    
-    # 4. Batch Descent (Every 5th iter)
-    if (batch_k > 1 && (it %% 5 == 0)) {
-      remain <- setdiff(can_all, best_res$j)
-      remain <- .with_seed(
-        as.integer(seed_iter + 10000L + it),
-        sample(remain, min(length(remain), N_SAMPLE_PER_ITER))
-      )
-      
-      if (length(remain) > 0) {
-        scores <- numeric(length(remain))
-        for (i in seq_along(remain)) {
-          j <- remain[i]
-          delta_b <- (max(w_min, w[j] * batch_factor)) - w[j]
-          scores[i] <- calc_id_fast(num_cur + delta_b * cache$N[[j]], 
-                                    den_cur + delta_b * cache$S[[j]], n_sub)
-        }
-        
-        ord <- order(scores)
-        take_idx <- head(ord, min(batch_k, length(ord)))
-        take_vars <- remain[take_idx]
-        
-        if (length(take_vars)) {
-          num_b <- num_cur; den_b <- den_cur
-          w_b <- w
-          for (j in take_vars) {
-            wn <- max(w_min, w[j] * batch_factor)
-            d  <- wn - w[j]
-            num_b <- num_b + d * cache$N[[j]]
-            den_b <- den_b + d * cache$S[[j]]
-            w_b[j] <- wn
-          }
-          id_b <- calc_id_fast(num_b, den_b, n_sub)
-          
-          if (is.finite(id_b) && id_b < id - 1e-6) {
-            num_cur <- num_b; den_cur <- den_b
-            w <- w_b
-            id <- id_b
-            changed <- TRUE
-            hist <- rbind(hist, data.frame(iter = it, ID = id, changed = "BATCH", note = paste(length(take_vars), "vars")))
-            if (verbose) cat(sprintf("   iter %d: [BATCH] x%.2f on %d vars (ID: %.3f)\n", it, batch_factor, length(take_vars), id))
-          }
-        }
-      }
-    }
-  }
+  opt <- gower_opt_stochastic_weights(
+    cache = cache,
+    vars = vars,
+    init_weights = w,
+    allow_update = allow_update,
+    id_fun = twonn_id_from_dist,
+    w_min = w_min,
+    step_grid = step_grid,
+    batch_k = batch_k,
+    batch_factor = batch_factor,
+    max_iter = max_iter_eff,
+    eval_per_iter = eval_per_iter_eff,
+    seed_iter = seed_iter,
+    seed_fun = function(seed, expr_fun) .with_seed(seed, expr_fun()),
+    progress_fun = progress_fun,
+    verbose = verbose,
+    n_rows = n_sub
+  )
+
+  w <- opt$weights
+  hist <- opt$history
+  id <- opt$final_ID
   
   if (plot_progress && requireNamespace("ggplot2", quietly = TRUE)) {
     gp <- ggplot2::ggplot(hist, ggplot2::aes(iter, ID)) +
       ggplot2::geom_line() + ggplot2::geom_point() +
-      ggplot2::labs(title = sprintf("Stochastic Gower Optim (N=%d, Batch=%d)", n_sub, N_SAMPLE_PER_ITER)) +
+      ggplot2::labs(title = sprintf("Stochastic Gower Optim (N=%d, Batch=%d)", n_sub, eval_per_iter_eff)) +
       ggplot2::theme_minimal()
     print(gp)
   }
@@ -600,10 +520,17 @@ knee_satopaa <- function(w) {
   x <- seq_len(n)
   
   if (n < 3L) return(list(k = n, thr = if (n) y[n] else 0.0))
+
+  y_range <- max(y, na.rm = TRUE) - min(y, na.rm = TRUE)
+  x_range <- max(x, na.rm = TRUE) - min(x, na.rm = TRUE)
+  if (!is.finite(y_range) || y_range <= .Machine$double.eps ||
+      !is.finite(x_range) || x_range <= .Machine$double.eps) {
+    return(list(k = n, thr = y[n]))
+  }
   
   # Normalize to Unit Square
-  y_norm <- (y - min(y)) / (max(y) - min(y))
-  x_norm <- (x - min(x)) / (max(x) - min(x))
+  y_norm <- (y - min(y)) / y_range
+  x_norm <- (x - min(x)) / x_range
   
   # Calculate Distance from Diagonal 
   # The sensitivity line is y = 1 - x (for decreasing curves).
@@ -631,8 +558,9 @@ survivors_from_weights <- function(w,
   w_sorted <- sort(w, decreasing = TRUE)
   
   # Plateau Detection
-  plateau_thresh <- 0.95  # Treat anything > 0.99 as part of the ceiling
-  idx_plateau_end <- max(which(w_sorted >= plateau_thresh))
+  plateau_thresh <- 0.95  # Treat high-weight items at or above this value as part of the ceiling.
+  plateau_idx <- which(w_sorted >= plateau_thresh)
+  idx_plateau_end <- if (length(plateau_idx)) max(plateau_idx) else NA_integer_
   
   if (!is.finite(idx_plateau_end) || idx_plateau_end == p) {
     idx_start <- 1
@@ -1420,7 +1348,12 @@ if (identical(WEIGHTING_MODE, "id_guided")) {
     )
 
     make_NS_cache_core <- make_NS_cache
-    environment(make_NS_cache_core) <- worker_parent
+    environment(make_NS_cache_core) <- list2env(
+      list(gower_opt_make_ns_cache = gower_opt_make_ns_cache),
+      parent = worker_parent
+    )
+
+    gower_opt_stochastic_weights_core <- gower_opt_stochastic_weights
 
     optimise_gower_weights_constrained_core <- optimise_gower_weights_constrained
     environment(optimise_gower_weights_constrained_core) <- list2env(
@@ -1429,9 +1362,11 @@ if (identical(WEIGHTING_MODE, "id_guided")) {
         .with_seed = with_seed_core,
         prep_X_for_gower = prep_X_for_gower_core,
         make_NS_cache = make_NS_cache_core,
+        gower_opt_stochastic_weights = gower_opt_stochastic_weights_core,
         twonn_id_from_dist = twonn_id_from_dist_core,
         RARE_LEVEL_MIN_PROP = RARE_LEVEL_MIN_PROP,
-        FIX_REP_SUBSET = FIX_REP_SUBSET
+        FIX_REP_SUBSET = FIX_REP_SUBSET,
+        W_EVAL_PER_ITER = get0("W_EVAL_PER_ITER", ifnotfound = 50L, inherits = TRUE)
       ),
       parent = worker_parent
     )
@@ -1455,6 +1390,7 @@ if (identical(WEIGHTING_MODE, "id_guided")) {
           NCORES_PAR = NCORES_PAR,
           reps = reps,
           core_idx_rep = core_idx_rep,
+          treat_ordinals_as_nominal = TREAT_ORDINALS_AS_NOMINAL,
           GOWER_MULTI_RUNS = GOWER_MULTI_RUNS,
           optimise_gower_weights_constrained_core = optimise_gower_weights_constrained_core,
           p = p
@@ -1490,6 +1426,7 @@ if (identical(WEIGHTING_MODE, "id_guided")) {
           reps_idx = reps,
           core_idx_rep = core_idx_rep,
           base_seed = base_seed_r,
+          treat_ordinals_as_nominal = treat_ordinals_as_nominal,
           verbose = verbose_r,
           plot_progress = plot_r,
           progress_fun = progress_cb
@@ -1526,6 +1463,7 @@ if (identical(WEIGHTING_MODE, "id_guided")) {
       reps_idx = reps,
       core_idx_rep = core_idx_rep,
       base_seed = SEED_GLOBAL,
+      treat_ordinals_as_nominal = TREAT_ORDINALS_AS_NOMINAL,
       verbose = TRUE,
       plot_progress = TRUE
     )
@@ -1714,9 +1652,9 @@ diag_idx <- switch(
   
   "sample_reps" = {
     pool <- if (exists("reps") && length(reps) > 0L) reps else seq_len(nrow(Xg))
-    n_take <- min(length(pool), DIAG_N_MAX)
+    n_take <- min(length(pool), N_ROWS_SUB)
     if (length(pool) > n_take) {
-      warn_diag_subsample("Final diag", n_take, length(pool), DIAG_N_MAX, "representatives")
+      warn_diag_subsample("Final diag", n_take, length(pool), N_ROWS_SUB, "representatives")
       .with_seed(.seed_from_key(SEED_GLOBAL, "final_diag_sample_reps"), sample(pool, n_take))
     } else {
       pool
@@ -1725,9 +1663,9 @@ diag_idx <- switch(
   
   "sample_all" = {
     pool <- seq_len(nrow(Xg))
-    n_take <- min(length(pool), DIAG_N_MAX)
+    n_take <- min(length(pool), N_ROWS_SUB)
     if (length(pool) > n_take) {
-      warn_diag_subsample("Final diag", n_take, length(pool), DIAG_N_MAX, "rows")
+      warn_diag_subsample("Final diag", n_take, length(pool), N_ROWS_SUB, "rows")
       .with_seed(.seed_from_key(SEED_GLOBAL, "final_diag_sample_all"), sample(pool, n_take))
     } else {
       pool
@@ -1907,6 +1845,90 @@ if (!is.null(DX_wide) && "NODIAG" %in% names(DX_wide)) {
   message("[target] NODIAG unavailable; using unsupervised folds.")
 }
 
+build_item_component_correlations_bundle <- function(Zmat, map, scores2d) {
+  if (is.null(map) || !length(map)) {
+    out <- matrix(numeric(0), nrow = 0L, ncol = 2L)
+    colnames(out) <- c("u1", "u2")
+    return(out)
+  }
+
+  safe_cor <- function(a, b) {
+    ok <- is.finite(a) & is.finite(b)
+    if (sum(ok) < 3L) return(NA_real_)
+    a <- a[ok]
+    b <- b[ok]
+    if (stats::sd(a) <= 1e-12 || stats::sd(b) <= 1e-12) return(NA_real_)
+    suppressWarnings(stats::cor(a, b))
+  }
+
+  vars <- unique(map)
+  out <- t(vapply(vars, function(nm) {
+    v <- score_item_base(nm, Zmat, map)
+    c(
+      u1 = safe_cor(v, scores2d[, 1]),
+      u2 = safe_cor(v, scores2d[, 2])
+    )
+  }, numeric(2)))
+  rownames(out) <- vars
+  colnames(out) <- c("u1", "u2")
+  out
+}
+
+if (!isTRUE(RUN_RESIDUAL_DIAGNOSTICS)) {
+  cat("[Residuals] Skipped residual GAM/Fprime diagnostics.\n")
+
+  item_component_correlations_base <- build_item_component_correlations_bundle(
+    Z,
+    varmap,
+    as.matrix(Base_A)
+  )
+  pc_scores_2d <- as.matrix(Base_A)
+  colnames(pc_scores_2d) <- c("u1", "u2")
+
+  write_csv(
+    data.frame(
+      participant_id = ids_base,
+      b1 = Base[, 1],
+      b2 = Base[, 2],
+      target = as.integer(y_use),
+      stringsAsFactors = FALSE
+    ),
+    "pc_scores_base_b1b2.csv"
+  )
+
+  write_csv(
+    data.frame(
+      var = names(w_full),
+      weight = as.numeric(w_full),
+      selected = names(w_full) %in% survivors,
+      stringsAsFactors = FALSE
+    ),
+    "gower_weights_id_guided.csv"
+  )
+
+  write_csv(
+    data.frame(
+      mm_col = colnames(Xenc),
+      source_var = as.character(varmap),
+      weight_share = as.numeric(w_enc[colnames(Xenc)]),
+      stringsAsFactors = FALSE
+    ),
+    "encoding_map_and_weight_share.csv"
+  )
+
+  saveRDS(list(
+    participant_id = ids_base,
+    pc_scores_2d = pc_scores_2d,
+    spectrum = base_spectrum,
+    explained_variance_ratio = base_explained_variance_ratio,
+    selected_items = survivors,
+    weights = w_full,
+    item_component_correlations = item_component_correlations_base,
+    weighting_mode = WEIGHTING_MODE,
+    decomp_method = BASE_DECOMP_METHOD,
+    residual_diagnostics_run = FALSE
+  ), file = "method_sensitivity_fit_bundle.rds")
+} else {
 E <- residualise_foldsafe(Xenc_w, Base, folds = fold_id, k_gam = 6)
 E_scaled <- scale(E, center = TRUE, scale = TRUE)
 
@@ -2014,7 +2036,7 @@ pick_m_via_tc <- function(Xhigh,
                           ks = 10:30,
                           mmax = ncol(Xlow_all),
                           lambda = 0.02,
-                          max_n = DIAG_N_MAX,
+                          max_n = N_ROWS_SUB,
                           pool_idx = NULL,
                           seed = SEED_GLOBAL,
                           key = "pick_m_via_tc") {
@@ -2121,7 +2143,7 @@ m_f <- pick_m_via_tc(
   ks = 10:30,
   mmax = ncol(Bprime_all),
   lambda = 0.02,
-  max_n = DIAG_N_MAX,
+  max_n = N_ROWS_SUB,
   pool_idx = pick_m_pool
 )
 Bprime <- Bprime_all[, 1:m_f, drop = FALSE]
@@ -2159,13 +2181,13 @@ Fprime <- residualise_linear_oof(Ef, Bprime, folds_f)
 # ID diagnostics in residual spaces
 resid_diag_from_reps <- exists("reps") && length(reps) > 0L
 resid_diag_pool <- if (resid_diag_from_reps) reps else seq_len(nrow(Bprime))
-resid_diag_n <- min(length(resid_diag_pool), DIAG_N_MAX)
+resid_diag_n <- min(length(resid_diag_pool), N_ROWS_SUB)
 resid_diag_idx <- if (length(resid_diag_pool) > resid_diag_n) {
   warn_diag_subsample(
     "Resid-only",
     resid_diag_n,
     length(resid_diag_pool),
-    DIAG_N_MAX,
+    N_ROWS_SUB,
     if (resid_diag_from_reps) "representatives" else "rows"
   )
   .with_seed(.seed_from_key(SEED_GLOBAL, "resid_space_diag_sample"), sample(resid_diag_pool, resid_diag_n))
@@ -3329,3 +3351,4 @@ saveRDS(list(
   weighting_mode = WEIGHTING_MODE,
   decomp_method = BASE_DECOMP_METHOD
 ), file = "method_sensitivity_fit_bundle.rds")
+}
