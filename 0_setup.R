@@ -85,6 +85,9 @@ default_setup_cfg <- list(
   NCORES_PAR = "all_but_one",
   FUTURE_GLOBALS_MAXSIZE = 1024^3
 )
+if (!exists("SETUP_CFG", inherits = FALSE) || is.null(SETUP_CFG)) {
+  SETUP_CFG <- list()
+}
 setup_cfg <- utils::modifyList(default_setup_cfg, SETUP_CFG)
 BAM_THREADS <- setup_cfg$BAM_THREADS
 SET_ENV_THREADS <- setup_cfg$SET_ENV_THREADS
