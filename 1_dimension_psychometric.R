@@ -1725,7 +1725,7 @@ Xenc <- design_with_map(X)
 varmap <- attr(Xenc, "varmap")
 vars <- unique(varmap)
 
-# Distribute Gower weights to encodings; sqrt-scale so PCA respects them
+# Distribute Gower weights to encodings; standardise first so PCA retains weights
 w_enc <- setNames(rep(1, ncol(Xenc)), colnames(Xenc))
 alloc <- table(varmap)
 for (nm in names(alloc)) {
@@ -1734,10 +1734,12 @@ for (nm in names(alloc)) {
   if (!is.finite(wj)) wj <- 1
   w_enc[idx] <- wj / length(idx)
 }
-Xenc_w <- sweep(Xenc, 2, sqrt(pmax(w_enc, 0)), "*")
+Z0 <- scale(Xenc, center = TRUE, scale = TRUE)
+Z0[!is.finite(Z0)] <- 0
+Xenc_w <- sweep(Z0, 2, sqrt(pmax(w_enc, 0)), "*")
 
 m_star <- as.integer(M_STAR_FIXED)
-Z <- scale(Xenc_w, center = TRUE, scale = TRUE)
+Z <- Xenc_w
 
 BASE_DECOMP_METHOD <- tolower(BASE_DECOMP_METHOD)
 if (!BASE_DECOMP_METHOD %in% c("robust_pca", "pca")) {

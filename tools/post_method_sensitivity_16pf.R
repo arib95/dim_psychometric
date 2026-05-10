@@ -2155,10 +2155,10 @@ distance_preservation_for_method <- function(fit,
 format_method_label <- function(method) {
   dplyr::recode(
     method,
-    pca_uniform = "PCA\nuniform",
-    robpca_uniform = "Robust PCA\nuniform",
-    pca_id_guided = "PCA\nID-guided",
-    robpca_id_guided = "Robust PCA\nID-guided",
+    pca_uniform = "All-item\nPCA",
+    robpca_uniform = "All-item\nrobust PCA",
+    pca_id_guided = "Selected-item\nPCA",
+    robpca_id_guided = "Selected-item\nrobust PCA",
     .default = gsub("_", "\n", method, fixed = TRUE)
   )
 }
@@ -2835,7 +2835,7 @@ run_method_sensitivity_summary <- function(cfg = default_method_sensitivity_cfg)
       labs(
         title = "Explained variance profile",
         x = "Component",
-        y = "Explained variance ratio"
+        y = "Explained variance"
       ) +
       method_sensitivity_plot_theme(setup_helpers$theme_pub, base_size = 11, y_grid = TRUE)
     save_method_sensitivity_plot(setup_helpers, "FIG_method_sensitivity_scree", scree_plot, width = 8, height = 5)
@@ -2853,7 +2853,7 @@ run_method_sensitivity_summary <- function(cfg = default_method_sensitivity_cfg)
       labs(
         title = "Fixed-map scale-score readout",
         x = NULL,
-        y = "Fold-validated readout R-squared"
+        y = "Five-fold readout R2"
       ) +
       method_sensitivity_plot_theme(setup_helpers$theme_pub, base_size = 11, legend_position = "none", y_grid = TRUE) +
       ggplot2::theme(
@@ -2881,7 +2881,7 @@ run_method_sensitivity_summary <- function(cfg = default_method_sensitivity_cfg)
       labs(
         title = "Leave-one-scale-out scale-score readout",
         x = NULL,
-        y = "Fold-validated readout R-squared"
+        y = "Five-fold readout R2"
       ) +
       method_sensitivity_plot_theme(setup_helpers$theme_pub, base_size = 11, legend_position = "none", y_grid = TRUE) +
       ggplot2::theme(
@@ -3083,15 +3083,15 @@ run_method_sensitivity_summary <- function(cfg = default_method_sensitivity_cfg)
       add_pareto_labels(data = pareto_data) +
       setup_helpers$scale_prob_fill(
         limits = range(summary_tbl$cv_r2_leave_one_scale_out_mean, na.rm = TRUE),
-        name = "Leave-one-scale-out CV R-squared"
+        name = "LOSO readout R2"
       ) +
       scale_shape_manual(values = decomp_shape_values, name = "Decomposition") +
       scale_y_continuous(labels = scales::label_percent(accuracy = 1)) +
       labs(
-        title = "Compression vs leave-one-scale-out readout",
+        title = "Item count and leave-one-scale-out readout",
         x = "Selected items",
-        y = "PC1 + PC2 explained variance ratio",
-        fill = "Leave-one-scale-out readout R-squared"
+        y = "PC1 + PC2 explained variance",
+        fill = "LOSO readout R2"
       ) +
       method_sensitivity_plot_theme(setup_helpers$theme_pub, base_size = 11)
     save_method_sensitivity_plot(setup_helpers, "FIG_method_sensitivity_pareto", pareto_plot, width = 8, height = 5)
@@ -3137,8 +3137,8 @@ run_method_sensitivity_summary <- function(cfg = default_method_sensitivity_cfg)
         facet_wrap(~target_method, scales = "free") +
         labs(
           title = "Matched random-subset baseline",
-          x = "Mean fixed-map readout R-squared",
-          y = "PC1 + PC2 explained variance ratio"
+          x = "Mean fixed-map readout R2",
+          y = "PC1 + PC2 explained variance"
         ) +
         method_sensitivity_plot_theme(setup_helpers$theme_pub, base_size = 11)
       save_method_sensitivity_plot(

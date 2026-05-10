@@ -90,10 +90,10 @@ write_csv2_safe <- function(x, path) {
 
 format_method_label <- function(method, multiline = FALSE) {
   labels <- c(
-    pca_uniform = if (multiline) "PCA\nuniform" else "PCA uniform",
-    robpca_uniform = if (multiline) "Robust PCA\nuniform" else "Robust PCA uniform",
-    pca_id_guided = if (multiline) "PCA\nID-guided" else "PCA ID-guided",
-    robpca_id_guided = if (multiline) "Robust PCA\nID-guided" else "Robust PCA ID-guided"
+    pca_uniform = if (multiline) "All-item\nPCA" else "All-item PCA",
+    robpca_uniform = if (multiline) "All-item\nrobust PCA" else "All-item robust PCA",
+    pca_id_guided = if (multiline) "Selected-item\nPCA" else "Selected-item PCA",
+    robpca_id_guided = if (multiline) "Selected-item\nrobust PCA" else "Selected-item robust PCA"
   )
   out <- unname(labels[as.character(method)])
   out[is.na(out)] <- gsub("_", if (multiline) "\n" else " ", as.character(method[is.na(out)]), fixed = TRUE)
@@ -292,6 +292,100 @@ summarise_metric_by_method <- function(data, value_cols) {
     )
 }
 
+preferred_id_guided_method <- function(methods) {
+  methods <- as.character(methods)
+  if ("pca_id_guided" %in% methods) return("pca_id_guided")
+  id_methods <- methods[grepl("id_guided", methods, fixed = TRUE)]
+  if (length(id_methods)) return(id_methods[[1L]])
+  methods[[1L]]
+}
+
+build_retained_item_table <- function(selected_item_content_tbl, item_weights_tbl) {
+  source_tbl <- if (!is.null(selected_item_content_tbl) && nrow(selected_item_content_tbl)) {
+    selected_item_content_tbl
+  } else {
+    item_weights_tbl |> dplyr::filter(.data$selected)
+  }
+  
+  source_method <- preferred_id_guided_method(unique(source_tbl$method))
+  source_tbl |>
+    dplyr::filter(.data$method == source_method) |>
+    dplyr::arrange(dplyr::desc(.data$weight), .data$item_id) |>
+    dplyr::mutate(Rank = dplyr::row_number(), .before = 1L) |>
+    dplyr::transmute(
+      Rank,
+      `Item ID` = .data$item_id,
+      `Item text` = .data$item_text,
+      Scale = .data$scale_name,
+      `Original 16PF factor` = .data$original_16pf_factor,
+      Keying = .data$keyed_sign,
+      `Final weight` = .data$weight,
+      `Active-survivor count` = .data$selection_count,
+      `Active-survivor proportion` = .data$selection_prop,
+      `Mean final weight` = .data$weight_mean
+    )
+}
+
+build_readout_delta_table <- function(readout_tbl) {
+  readout_tbl |>
+    dplyr::select(scale_name, method, cv_r2) |>
+    tidyr::pivot_wider(names_from = method, values_from = cv_r2) |>
+    dplyr::transmute(
+      Scale = format_scale_label(.data$scale_name),
+      `All-item PCA R2` = .data$pca_uniform,
+      `Selected-item PCA R2` = .data$pca_id_guided,
+      `PCA delta` = .data$pca_id_guided - .data$pca_uniform,
+      `All-item robust PCA R2` = .data$robpca_uniform,
+      `Selected-item robust PCA R2` = .data$robpca_id_guided,
+      `Robust PCA delta` = .data$robpca_id_guided - .data$robpca_uniform
+    ) |>
+    dplyr::arrange(.data$Scale)
+}
+
+build_stability_summary_table <- function(full_refit_stability_tbl,
+                                          fixed_selection_stability_tbl,
+                                          selection_stability_tbl,
+                                          stability_metrics,
+                                          selection_metrics) {
+  dplyr::bind_rows(
+    summarise_metric_by_method(fixed_selection_stability_tbl, stability_metrics) |>
+      dplyr::mutate(analysis = "Fixed selected set", .before = 1L),
+    summarise_metric_by_method(full_refit_stability_tbl, stability_metrics) |>
+      dplyr::mutate(analysis = "Split-half re-selection maps", .before = 1L),
+    summarise_metric_by_method(selection_stability_tbl, selection_metrics) |>
+      dplyr::mutate(analysis = "Split-half re-selection item sets", .before = 1L)
+  ) |>
+    dplyr::transmute(
+      Analysis = .data$analysis,
+      Method = .data$method_label,
+      Metric = .data$metric_label,
+      N = .data$n,
+      Mean = .data$mean,
+      SD = .data$sd,
+      Median = .data$median,
+      `5th percentile` = .data$q05,
+      `95th percentile` = .data$q95
+    )
+}
+
+build_distance_geometry_table <- function(distance_preservation_tbl) {
+  distance_preservation_tbl |>
+    dplyr::mutate(method = factor(.data$method, levels = observed_method_levels)) |>
+    dplyr::arrange(.data$method) |>
+    dplyr::transmute(
+      Method = format_method_label(as.character(.data$method)),
+      `Evaluation N` = .data$n_eval,
+      `Neighbour count` = .data$k_neighbors,
+      Items = .data$n_items_selected,
+      `Gower TwoNN ID` = .data$gower_twonn_id,
+      `Gower-map Pearson r` = .data$map_distance_pearson,
+      `Gower-map Spearman r` = .data$map_distance_spearman,
+      `Gower-to-map neighbour overlap` = .data$neighbourhood_overlap_gower_to_map,
+      `Map-to-Gower neighbour overlap` = .data$neighbourhood_overlap_map_to_gower,
+      `PCoA two-axis positive-eigen share` = .data$pcoa2_positive_eigen_share
+    )
+}
+
 build_selected_map_plot <- function(pc_scores_tbl,
                                     scale_vectors_tbl,
                                     summary_tbl,
@@ -408,7 +502,7 @@ results_dir <- normalise_dir(cfg$results_dir %||% infer_results_dir(), must_work
 output_dir <- normalise_dir(cfg$output_dir %||% file.path(results_dir, "publication_bw"), must_work = FALSE)
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
-message("Reading cached method-sensitivity outputs from: ", results_dir)
+message("Reading cached evaluation outputs from: ", results_dir)
 message("Writing publication figures and tables to: ", output_dir)
 
 summary_tbl <- read_result(results_dir, "method_sensitivity_summary.csv")
@@ -431,6 +525,15 @@ if (length(observed_method_levels) != nrow(summary_tbl)) {
   observed_method_levels <- unique(summary_tbl$method)
 }
 method_label_lookup <- stats::setNames(format_method_label(observed_method_levels, multiline = TRUE), observed_method_levels)
+pc12_method_label_lookup <- stats::setNames(
+  c(
+    pca_uniform = "All-item\nPCA",
+    robpca_uniform = "All-item\nrobust PCA",
+    pca_id_guided = "Selected\nPCA",
+    robpca_id_guided = "Selected\nrobust PCA"
+  )[observed_method_levels],
+  observed_method_levels
+)
 
 summary_tbl <- summary_tbl |>
   dplyr::mutate(
@@ -461,20 +564,18 @@ table1_pub <- table1_raw |>
   dplyr::transmute(
     Method = method_label,
     Items = n_items_selected,
-    PC1 = fmt_pct(pc1_explained_variance_ratio),
-    PC2 = fmt_pct(pc2_explained_variance_ratio),
-    `PC1+PC2` = fmt_pct(pc12_explained_variance_ratio),
-    `PC1-PC5` = fmt_pct(pc5_explained_variance_ratio),
-    `PC1-PC10` = fmt_pct(pc10_explained_variance_ratio),
-    `Mean direct readout R2` = fmt_num(cv_r2_scale_prediction_mean),
-    `Mean LOSO readout R2` = fmt_num(cv_r2_leave_one_scale_out_mean),
-    `Fixed-selection axis correlation` = fmt_num(fixed_selection_axis_corr_mean),
-    `Fixed-selection scale-vector cosine` = fmt_num(fixed_selection_scale_regression_vector_cosine_mean)
+    `PC1+2` = fmt_pct(pc12_explained_variance_ratio),
+    `PC1-5` = fmt_pct(pc5_explained_variance_ratio),
+    `PC1-10` = fmt_pct(pc10_explained_variance_ratio),
+    `Direct R2` = fmt_num(cv_r2_scale_prediction_mean),
+    `LOSO R2` = fmt_num(cv_r2_leave_one_scale_out_mean),
+    `Axis r` = fmt_num(fixed_selection_axis_corr_mean),
+    `Scale cos.` = fmt_num(fixed_selection_scale_regression_vector_cosine_mean)
   )
 
-write_csv2_safe(table1_raw, file.path(output_dir, "TABLE_1_method_sensitivity_summary_raw.csv"))
-write_csv2_safe(table1_pub, file.path(output_dir, "TABLE_1_method_sensitivity_summary.csv"))
-write_markdown_table(table1_pub, file.path(output_dir, "TABLE_1_method_sensitivity_summary.md"))
+write_csv2_safe(table1_raw, file.path(output_dir, "TABLE_1_analytic_solution_summary_raw.csv"))
+write_csv2_safe(table1_pub, file.path(output_dir, "TABLE_1_analytic_solution_summary.csv"))
+write_markdown_table(table1_pub, file.path(output_dir, "TABLE_1_analytic_solution_summary.md"))
 
 if (!is.null(pc_scores_tbl) && !is.null(scale_regression_vectors_tbl)) {
   fig1_map <- build_selected_map_plot(
@@ -486,10 +587,10 @@ if (!is.null(pc_scores_tbl) && !is.null(scale_regression_vectors_tbl)) {
   )
   save_plot_pair(
     fig1_map,
-    "FIG_1_selected_item_respondent_map_bw",
+    "FIG_3_selected_item_respondent_map_bw",
     output_dir = output_dir,
-    width = 4.2,
-    height = 3.2,
+    width = 7.4,
+    height = 4.2,
     dpi = cfg$dpi
   )
 }
@@ -552,16 +653,16 @@ fig1_pc12 <- ggplot2::ggplot(
     vjust = -0.45,
     size = 2.5
   ) +
-  ggplot2::scale_x_discrete(labels = method_label_lookup) +
+  ggplot2::scale_x_discrete(labels = pc12_method_label_lookup) +
   ggplot2::scale_y_continuous(labels = scales::label_percent(accuracy = 1), expand = ggplot2::expansion(mult = c(0, 0.14))) +
   ggplot2::scale_fill_manual(values = c(PC1 = "grey35", PC2 = "grey82"), name = NULL) +
   ggplot2::labs(tag = "B", x = NULL, y = "PC1 + PC2 explained variance") +
   theme_pub_bw(base_size = 11, y_grid = TRUE, legend_position = "bottom") +
-  ggplot2::theme(axis.text.x = ggplot2::element_text(lineheight = 0.9))
+  ggplot2::theme(axis.text.x = ggplot2::element_text(size = 9, lineheight = 0.9))
 
 save_plot_grid(
   list(fig1_scree, fig1_pc12),
-  "SUPP_FIG_eigenspectrum_two_component_concentration_bw",
+  "FIG_1_eigenspectrum_two_component_concentration_bw",
   output_dir = output_dir,
   width = 8.2,
   height = 4.2,
@@ -593,10 +694,10 @@ baseline_tail_labels <- baseline_plot_data |>
   dplyr::summarise(
     n_reps = dplyr::n(),
     q95 = stats::quantile(pc12_explained_variance_ratio, 0.95, na.rm = TRUE),
-    y = max(pc12_explained_variance_ratio, na.rm = TRUE),
     .groups = "drop"
   ) |>
   dplyr::mutate(
+    y_label = q95 + 0.002,
     label = sprintf("n=%d\n95th=%s", n_reps, scales::percent(q95, accuracy = 0.1))
   )
 
@@ -633,23 +734,26 @@ fig2 <- ggplot2::ggplot(
     stroke = 0.45
   ) +
   ggplot2::geom_text(
-    data = id_guided_reference,
-    ggplot2::aes(x = 1.5, y = pc12_explained_variance_ratio, label = "Observed\nID-guided"),
+    data = baseline_tail_labels |> dplyr::filter(.data$subset_mode == "Unstratified"),
+    ggplot2::aes(x = subset_mode, y = y_label, label = label),
     inherit.aes = FALSE,
-    vjust = -0.9,
-    size = 2.4,
+    position = ggplot2::position_nudge(x = -0.32),
+    hjust = 0.5,
+    size = 2.2,
     lineheight = 0.9
   ) +
   ggplot2::geom_text(
-    data = baseline_tail_labels,
-    ggplot2::aes(x = subset_mode, y = y, label = label),
+    data = baseline_tail_labels |> dplyr::filter(.data$subset_mode == "Scale-stratified"),
+    ggplot2::aes(x = subset_mode, y = y_label, label = label),
     inherit.aes = FALSE,
-    vjust = -0.15,
+    position = ggplot2::position_nudge(x = 0.32),
+    hjust = 0.5,
     size = 2.2,
     lineheight = 0.9
   ) +
   ggplot2::facet_wrap(~target_method, nrow = 1) +
   ggplot2::scale_fill_manual(values = c("Unstratified" = "white", "Scale-stratified" = "grey78"), guide = "none") +
+  ggplot2::scale_x_discrete(expand = ggplot2::expansion(add = 0.46)) +
   ggplot2::scale_y_continuous(labels = scales::label_percent(accuracy = 1), expand = ggplot2::expansion(mult = c(0.03, 0.12))) +
   ggplot2::labs(x = "Matched random-subset sampling scheme", y = "PC1 + PC2 explained variance") +
   theme_pub_bw(base_size = 11, y_grid = TRUE, legend_position = "none") +
@@ -707,12 +811,12 @@ fig3 <- ggplot2::ggplot(
   ggplot2::scale_fill_manual(values = c(`TRUE` = "grey45", `FALSE` = "white"), guide = "none") +
   ggplot2::scale_x_continuous(labels = scales::label_number(accuracy = 0.01), expand = ggplot2::expansion(mult = c(0.08, 0.08))) +
   ggplot2::scale_y_discrete(labels = format_scale_label) +
-  ggplot2::labs(x = "Delta leave-one-scale-out readout R2 (ID-guided minus uniform)", y = NULL) +
+  ggplot2::labs(x = "Delta LOSO R2 (selected-item minus all-item)", y = NULL) +
   theme_pub_bw(base_size = 11, y_grid = TRUE, x_grid = TRUE, legend_position = "none")
 
 save_plot_pair(
   fig3,
-  "FIG_3_leave_one_scale_out_delta_by_scale_bw",
+  "FIG_4_leave_one_scale_out_delta_by_scale_bw",
   output_dir = output_dir,
   width = 7.5,
   height = 5.8,
@@ -741,13 +845,21 @@ fig_direct <- scale_prediction_tbl |>
   ggplot2::scale_shape_manual(values = method_shapes[observed_method_levels], labels = method_label_lookup) +
   ggplot2::scale_x_continuous(labels = scales::label_number(accuracy = 0.01), expand = ggplot2::expansion(mult = c(0.02, 0.06))) +
   ggplot2::scale_y_discrete(labels = format_scale_label) +
-  ggplot2::labs(x = "Direct fixed-map readout R2", y = NULL) +
+  ggplot2::labs(x = "Direct readout R2", y = NULL) +
   theme_pub_bw(base_size = 11, y_grid = TRUE, x_grid = TRUE, legend_position = "bottom") +
   ggplot2::guides(shape = ggplot2::guide_legend(nrow = 2, byrow = TRUE))
 
 save_plot_pair(
   fig_direct,
   "SUPP_FIG_direct_scale_score_prediction_by_scale_method_bw",
+  output_dir = output_dir,
+  width = 7.5,
+  height = 5.8,
+  dpi = cfg$dpi
+)
+save_plot_pair(
+  fig_direct,
+  "SUPP_FIG_S1_direct_scale_score_readout_by_scale_bw",
   output_dir = output_dir,
   width = 7.5,
   height = 5.8,
@@ -814,6 +926,14 @@ save_plot_pair(
   height = 3.6,
   dpi = cfg$dpi
 )
+save_plot_pair(
+  fig_selection,
+  "SUPP_FIG_S2_selection_stability_bw",
+  output_dir = output_dir,
+  width = 6.8,
+  height = 3.6,
+  dpi = cfg$dpi
+)
 
 id_weight_data <- item_weights_tbl |>
   dplyr::filter(selected, grepl("id_guided", method, fixed = TRUE)) |>
@@ -835,6 +955,14 @@ fig_weights <- ggplot2::ggplot(id_weight_data, ggplot2::aes(x = rank, y = weight
 save_plot_pair(
   fig_weights,
   "SUPP_FIG_id_guided_item_weights_ranked_bw",
+  output_dir = output_dir,
+  width = 7.2,
+  height = 5.0,
+  dpi = cfg$dpi
+)
+save_plot_pair(
+  fig_weights,
+  "SUPP_FIG_S4_ranked_selected_item_weights_bw",
   output_dir = output_dir,
   width = 7.2,
   height = 5.0,
@@ -907,6 +1035,53 @@ if (!is.null(distance_preservation_tbl) && nrow(distance_preservation_tbl)) {
     height = 5.4,
     dpi = cfg$dpi
   )
+  save_plot_pair(
+    distance_plot,
+    "SUPP_FIG_S3_distance_geometry_checks_bw",
+    output_dir = output_dir,
+    width = 8.4,
+    height = 5.4,
+    dpi = cfg$dpi
+  )
+}
+
+retained_item_supp_tbl <- build_retained_item_table(selected_item_content_tbl, item_weights_tbl)
+loso_readout_supp_tbl <- build_readout_delta_table(leave_one_scale_out_tbl)
+direct_readout_supp_tbl <- build_readout_delta_table(scale_prediction_tbl)
+stability_summary_supp_tbl <- build_stability_summary_table(
+  full_refit_stability_tbl = full_refit_stability_tbl,
+  fixed_selection_stability_tbl = fixed_selection_stability_tbl,
+  selection_stability_tbl = selection_stability_tbl,
+  stability_metrics = stability_metrics,
+  selection_metrics = selection_metrics
+)
+distance_geometry_supp_tbl <- if (!is.null(distance_preservation_tbl) && nrow(distance_preservation_tbl)) {
+  build_distance_geometry_table(distance_preservation_tbl)
+} else {
+  NULL
+}
+
+write_csv2_safe(
+  retained_item_supp_tbl,
+  file.path(output_dir, "SUPP_TABLE_S1_retained_item_set.csv")
+)
+write_csv2_safe(
+  loso_readout_supp_tbl,
+  file.path(output_dir, "SUPP_TABLE_S2_leave_one_scale_out_readout_by_scale.csv")
+)
+write_csv2_safe(
+  direct_readout_supp_tbl,
+  file.path(output_dir, "SUPP_TABLE_S3_direct_scale_score_readout_by_scale.csv")
+)
+write_csv2_safe(
+  stability_summary_supp_tbl,
+  file.path(output_dir, "SUPP_TABLE_S4_stability_summary.csv")
+)
+if (!is.null(distance_geometry_supp_tbl)) {
+  write_csv2_safe(
+    distance_geometry_supp_tbl,
+    file.path(output_dir, "SUPP_TABLE_S5_distance_geometry_checks.csv")
+  )
 }
 
 write_csv2_safe(
@@ -965,13 +1140,10 @@ write_csv2_safe(
     dplyr::mutate(method_label = format_method_label(method), .after = method),
   file.path(output_dir, "SUPP_TABLE_item_weights_selected_items.csv")
 )
-if (!is.null(selected_item_content_tbl) && nrow(selected_item_content_tbl)) {
-  write_csv2_safe(
-    selected_item_content_tbl |>
-      dplyr::mutate(method_label = format_method_label(method), .after = method),
-    file.path(output_dir, "SUPP_TABLE_selected_item_content.csv")
-  )
-}
+write_csv2_safe(
+  retained_item_supp_tbl,
+  file.path(output_dir, "SUPP_TABLE_selected_item_content.csv")
+)
 write_csv2_safe(
   item_component_correlations_tbl |>
     dplyr::mutate(method_label = format_method_label(method), .after = method),
@@ -984,34 +1156,52 @@ write_csv2_safe(
 )
 
 manifest_artifacts <- c(
-  "TABLE_1_method_sensitivity_summary.csv",
-  "TABLE_1_method_sensitivity_summary.md",
-  if (!is.null(pc_scores_tbl) && !is.null(scale_regression_vectors_tbl)) "FIG_1_selected_item_respondent_map_bw.pdf",
+  "TABLE_1_analytic_solution_summary.csv",
+  "TABLE_1_analytic_solution_summary.md",
+  "FIG_1_eigenspectrum_two_component_concentration_bw.pdf",
   "FIG_2_matched_random_subset_pc12_distribution_bw.pdf",
-  "FIG_3_leave_one_scale_out_delta_by_scale_bw.pdf",
-  "SUPP_FIG_eigenspectrum_two_component_concentration_bw.pdf",
+  if (!is.null(pc_scores_tbl) && !is.null(scale_regression_vectors_tbl)) "FIG_3_selected_item_respondent_map_bw.pdf",
+  "FIG_4_leave_one_scale_out_delta_by_scale_bw.pdf",
+  "SUPP_TABLE_S1_retained_item_set.csv",
+  "SUPP_TABLE_S2_leave_one_scale_out_readout_by_scale.csv",
+  "SUPP_TABLE_S3_direct_scale_score_readout_by_scale.csv",
+  "SUPP_TABLE_S4_stability_summary.csv",
+  if (!is.null(distance_geometry_supp_tbl)) "SUPP_TABLE_S5_distance_geometry_checks.csv",
+  "SUPP_FIG_S1_direct_scale_score_readout_by_scale_bw.pdf",
+  "SUPP_FIG_S2_selection_stability_bw.pdf",
+  if (!is.null(distance_geometry_supp_tbl)) "SUPP_FIG_S3_distance_geometry_checks_bw.pdf",
+  "SUPP_FIG_S4_ranked_selected_item_weights_bw.pdf",
   "SUPP_FIG_direct_scale_score_prediction_by_scale_method_bw.pdf",
   if (!is.null(distance_preservation_tbl) && nrow(distance_preservation_tbl)) "SUPP_FIG_distance_geometry_checks_bw.pdf",
   "SUPP_FIG_split_half_full_refit_stability_bw.pdf",
   "SUPP_FIG_selection_jaccard_and_weight_stability_bw.pdf",
   "SUPP_FIG_id_guided_item_weights_ranked_bw.pdf",
   "SUPP_FIG_item_component_correlations_selected_items_bw.pdf",
-  if (!is.null(selected_item_content_tbl) && nrow(selected_item_content_tbl)) "SUPP_TABLE_selected_item_content.csv"
+  "SUPP_TABLE_selected_item_content.csv"
 )
 manifest_descriptions <- c(
   "Formatted manuscript summary table.",
   "Markdown rendering of Table 1.",
-  if (!is.null(pc_scores_tbl) && !is.null(scale_regression_vectors_tbl)) "Selected-item two-dimensional respondent map with scale-score gradients.",
-  "Matched random-subset baseline foregrounding PC1+PC2 distributions.",
-  "Leave-one-scale-out readout differences by scale.",
   "Eigenspectrum and PC1+PC2 concentration across analytic solutions.",
+  "Matched random-subset baseline for PC1+PC2 explained variance.",
+  if (!is.null(pc_scores_tbl) && !is.null(scale_regression_vectors_tbl)) "Selected-item two-dimensional respondent map with scale-score gradients.",
+  "Leave-one-scale-out readout differences by scale.",
+  "Retained item set with scale membership, keying, final weights, and survivor frequencies.",
+  "Leave-one-scale-out scale-score readout by scale.",
+  "Direct scale-score readout by scale.",
+  "Split-half fixed-selection, full-refit, and selection-stability summaries.",
+  if (!is.null(distance_geometry_supp_tbl)) "Distance-geometry check values.",
+  "Direct fixed-map scale-score readout by scale and method.",
+  "Selection Jaccard and aligned-weight stability.",
+  if (!is.null(distance_geometry_supp_tbl)) "Distance-geometry checks comparing Gower distances with two-dimensional map distances.",
+  "Ranked retained-item weights.",
   "Direct fixed-map scale-score readout by scale and method.",
   if (!is.null(distance_preservation_tbl) && nrow(distance_preservation_tbl)) "Distance-geometry checks comparing Gower distances with two-dimensional map distances.",
   "Split-half full-refit stability.",
   "Selection Jaccard and aligned-weight stability.",
   "Ranked ID-guided item weights.",
   "Selected item-component correlations.",
-  if (!is.null(selected_item_content_tbl) && nrow(selected_item_content_tbl)) "Selected item content, scale membership, keying, weights, and selection frequency."
+  "Selected item content, scale membership, keying, weights, and selection frequency."
 )
 manifest <- tibble::tibble(
   artifact = manifest_artifacts,
