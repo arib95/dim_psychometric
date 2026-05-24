@@ -43,6 +43,8 @@ default_method_sensitivity_cfg <- list(
   run_residual_diagnostics = FALSE
 )
 
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 messagef <- function(...) {
   message(sprintf(...))
 }
@@ -76,6 +78,23 @@ method_specs <- tibble::tribble(
   "id_guided", "robust_pca", "robpca_id_guided"
 )
 
+run_cfg_fields <- c(
+  "bam_threads",
+  "ncores_par",
+  "omp_threads",
+  "blas_threads",
+  "optimisation_subsample_n",
+  "optimisation_w_min",
+  "optimisation_multi_runs",
+  "optimisation_multi_min_prop",
+  "optimisation_step_grid",
+  "optimisation_batch_k",
+  "optimisation_batch_factor",
+  "optimisation_max_iter",
+  "optimisation_eval_per_iter",
+  "run_residual_diagnostics"
+)
+
 run_one_variant <- function(spec, cfg, root_dir, runner_env) {
   run_dir <- file.path(cfg$out_dir, spec$run_dir[[1]])
   bundle_path <- file.path(run_dir, "method_sensitivity_fit_bundle.rds")
@@ -87,29 +106,18 @@ run_one_variant <- function(spec, cfg, root_dir, runner_env) {
   }
   
   messagef("Running %s -> %s", label, run_dir)
-  run_cfg <- list(
-    root_dir = root_dir,
-    out_dir = run_dir,
-    weighting_mode = spec$weighting_mode[[1]],
-    decomp_method = spec$decomp_method[[1]],
-    psych_csv = cfg$data_path,
-    diag_csv = cfg$diag_path,
-    setup_script = file.path(root_dir, "0_setup.R"),
-    main_script = file.path(root_dir, "1_dimension_psychometric.R"),
-    bam_threads = cfg$bam_threads,
-    ncores_par = cfg$ncores_par,
-    omp_threads = cfg$omp_threads,
-    blas_threads = cfg$blas_threads,
-    optimisation_subsample_n = cfg$optimisation_subsample_n,
-    optimisation_w_min = cfg$optimisation_w_min,
-    optimisation_multi_runs = cfg$optimisation_multi_runs,
-    optimisation_multi_min_prop = cfg$optimisation_multi_min_prop,
-    optimisation_step_grid = cfg$optimisation_step_grid,
-    optimisation_batch_k = cfg$optimisation_batch_k,
-    optimisation_batch_factor = cfg$optimisation_batch_factor,
-    optimisation_max_iter = cfg$optimisation_max_iter,
-    optimisation_eval_per_iter = cfg$optimisation_eval_per_iter,
-    run_residual_diagnostics = cfg$run_residual_diagnostics
+  run_cfg <- c(
+    cfg[run_cfg_fields],
+    list(
+      root_dir = root_dir,
+      out_dir = run_dir,
+      weighting_mode = spec$weighting_mode[[1]],
+      decomp_method = spec$decomp_method[[1]],
+      psych_csv = cfg$data_path,
+      diag_csv = cfg$diag_path,
+      setup_script = file.path(root_dir, "0_setup.R"),
+      main_script = file.path(root_dir, "1_dimension_psychometric.R")
+    )
   )
   runner_env$run_dimension_variant_main(run_cfg)
   invisible(bundle_path)
@@ -118,6 +126,7 @@ run_one_variant <- function(spec, cfg, root_dir, runner_env) {
 run_method_sensitivity_16pf <- function(cfg = default_method_sensitivity_cfg) {
   cfg <- utils::modifyList(default_method_sensitivity_cfg, cfg)
   root_dir <- cfg$root_dir %||% infer_root_dir()
+  cfg$root_dir <- root_dir
   cfg$out_dir <- normalise_path(cfg$out_dir, root_dir, must_work = FALSE)
   cfg$data_path <- normalise_path(cfg$data_path, root_dir, must_work = TRUE)
   cfg$diag_path <- normalise_path(cfg$diag_path, root_dir, must_work = FALSE)
@@ -140,44 +149,8 @@ run_method_sensitivity_16pf <- function(cfg = default_method_sensitivity_cfg) {
   
   if (isTRUE(cfg$run_post)) {
     messagef("Running method summaries in %s", cfg$out_dir)
-    summary_env$run_method_sensitivity_summary(list(
-      root_dir = root_dir,
-      out_dir = cfg$out_dir,
-      data_path = cfg$data_path,
-      qbank_path = cfg$qbank_path,
-      scale_spec_path = cfg$scale_spec_path,
-      setup_script = cfg$setup_script,
-      bam_threads = cfg$bam_threads,
-      ncores_par = cfg$ncores_par,
-      omp_threads = cfg$omp_threads,
-      blas_threads = cfg$blas_threads,
-      seed = cfg$seed,
-      min_scale_completion_prop = cfg$min_scale_completion_prop,
-      cv_folds = cfg$cv_folds,
-      optimisation_subsample_n = cfg$optimisation_subsample_n,
-      optimisation_w_min = cfg$optimisation_w_min,
-      optimisation_multi_runs = cfg$optimisation_multi_runs,
-      selection_stability_optimisation_multi_runs = cfg$selection_stability_optimisation_multi_runs,
-      optimisation_multi_min_prop = cfg$optimisation_multi_min_prop,
-      optimisation_step_grid = cfg$optimisation_step_grid,
-      optimisation_batch_k = cfg$optimisation_batch_k,
-      optimisation_batch_factor = cfg$optimisation_batch_factor,
-      optimisation_max_iter = cfg$optimisation_max_iter,
-      optimisation_eval_per_iter = cfg$optimisation_eval_per_iter,
-      stability_reps = cfg$stability_reps,
-      stability_fixed_selection_reps = cfg$stability_fixed_selection_reps,
-      stability_half_n = cfg$stability_half_n,
-      split_half_full_refit_parallel = cfg$split_half_full_refit_parallel,
-      split_half_data_cache = cfg$split_half_data_cache,
-      post_parallel_diagnostics = cfg$post_parallel_diagnostics,
-      spectrum_rank = cfg$spectrum_rank,
-      baseline_reps = cfg$baseline_reps,
-      baseline_subset_modes = cfg$baseline_subset_modes,
-      distance_eval_n = cfg$distance_eval_n,
-      distance_eval_k = cfg$distance_eval_k,
-      future_scheduling = cfg$future_scheduling,
-      save_plots = cfg$save_plots
-    ))
+    summary_fields <- intersect(names(cfg), names(summary_env$default_method_sensitivity_cfg))
+    summary_env$run_method_sensitivity_summary(cfg[summary_fields])
   }
   
   messagef("Finished. Outputs written to %s", cfg$out_dir)

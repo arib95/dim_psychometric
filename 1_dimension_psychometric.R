@@ -1878,58 +1878,6 @@ build_item_component_correlations_bundle <- function(Zmat, map, scores2d) {
 
 if (!isTRUE(RUN_RESIDUAL_DIAGNOSTICS)) {
   cat("[Residuals] Skipped residual GAM/Fprime diagnostics.\n")
-
-  item_component_correlations_base <- build_item_component_correlations_bundle(
-    Z,
-    varmap,
-    as.matrix(Base_A)
-  )
-  pc_scores_2d <- as.matrix(Base_A)
-  colnames(pc_scores_2d) <- c("u1", "u2")
-
-  write_csv(
-    data.frame(
-      participant_id = ids_base,
-      b1 = Base[, 1],
-      b2 = Base[, 2],
-      target = as.integer(y_use),
-      stringsAsFactors = FALSE
-    ),
-    "pc_scores_base_b1b2.csv"
-  )
-
-  write_csv(
-    data.frame(
-      var = names(w_full),
-      weight = as.numeric(w_full),
-      selected = names(w_full) %in% survivors,
-      stringsAsFactors = FALSE
-    ),
-    "gower_weights_id_guided.csv"
-  )
-
-  write_csv(
-    data.frame(
-      mm_col = colnames(Xenc),
-      source_var = as.character(varmap),
-      weight_share = as.numeric(w_enc[colnames(Xenc)]),
-      stringsAsFactors = FALSE
-    ),
-    "encoding_map_and_weight_share.csv"
-  )
-
-  saveRDS(list(
-    participant_id = ids_base,
-    pc_scores_2d = pc_scores_2d,
-    spectrum = base_spectrum,
-    explained_variance_ratio = base_explained_variance_ratio,
-    selected_items = survivors,
-    weights = w_full,
-    item_component_correlations = item_component_correlations_base,
-    weighting_mode = WEIGHTING_MODE,
-    decomp_method = BASE_DECOMP_METHOD,
-    residual_diagnostics_run = FALSE
-  ), file = "method_sensitivity_fit_bundle.rds")
 } else {
 E <- residualise_foldsafe(Xenc_w, Base, folds = fold_id, k_gam = 6)
 E_scaled <- scale(E, center = TRUE, scale = TRUE)
@@ -2536,12 +2484,19 @@ if (DX_AVAILABLE) {
 } else {
   message("[dx] Section 8 (predictive diagnostics & interactions) disabled: DX set as optional (setup.R)")
 }
+}
 
 # ==============================================================================
 # 9. Outputs and Session
 # ==============================================================================
 
-if (DX_AVAILABLE && !is.null(DX_wide) && ncol(DX_wide) > 0) {
+if (isTRUE(RUN_RESIDUAL_DIAGNOSTICS) &&
+    DX_AVAILABLE &&
+    !is.null(DX_wide) &&
+    ncol(DX_wide) > 0 &&
+    exists("clF") &&
+    exists("Bprime") &&
+    exists("DxW_A")) {
 
   # Cluster Summaries
   kF <- length(unique(clF))
@@ -2675,7 +2630,11 @@ if (DX_AVAILABLE && !is.null(DX_wide) && ncol(DX_wide) > 0) {
     warning("[clusters] No Dx columns after filtering for enrichment; skipped.")
   }
 } else {
-  message("[dx] Enrichment by diagnosis disabled: DX set as optional.")
+  if (isTRUE(RUN_RESIDUAL_DIAGNOSTICS)) {
+    message("[dx] Enrichment by diagnosis disabled: DX set as optional or residual clustering unavailable.")
+  } else {
+    message("[clusters] Residual diagnostics skipped; residual cluster enrichment skipped.")
+  }
 }
 
 # ------------------------------------------------------------------------------
@@ -2758,7 +2717,11 @@ inside_hull <- function(px, py, poly, eps = 1e-12) {
   inside | on_edge
 }
 
-build_geometry <- function(Base_A, GRID_N_B = 600, GRID_N_U = 600) {
+build_geometry <- function(Base_A,
+                           grid_n_b = get0("GRID_N_B", ifnotfound = 600L, inherits = TRUE),
+                           grid_n_u = get0("GRID_N_U", ifnotfound = 600L, inherits = TRUE)) {
+  grid_n_b <- max(2L, as.integer(grid_n_b))
+  grid_n_u <- max(2L, as.integer(grid_n_u))
   B1 <- Base_A[, 1]; B2 <- Base_A[, 2]
   df_base <- data.frame(b1 = as.numeric(B1), b2 = as.numeric(B2))
   rownames(df_base) <- rownames(Base_A)
@@ -2768,7 +2731,7 @@ build_geometry <- function(Base_A, GRID_N_B = 600, GRID_N_U = 600) {
   names(U) <- c("u1", "u2")
   rownames(U) <- rownames(Base_A)
   
-  UD <- make_unitdisk_square(GRID_N_B)
+  UD <- make_unitdisk_square(grid_n_b)
   gridX_sq <- as.data.frame(Xstd$inv(UD$grid$u1, UD$grid$u2))
   mask_sq <- UD$mask_vec
   
@@ -2777,8 +2740,8 @@ build_geometry <- function(Base_A, GRID_N_B = 600, GRID_N_U = 600) {
   
   qx <- range(df_base$b1); qy <- range(df_base$b2)
   gridB_full <- expand.grid(
-    b1 = seq(qx[1], qx[2], length.out = GRID_N_U),
-    b2 = seq(qy[1], qy[2], length.out = GRID_N_U)
+    b1 = seq(qx[1], qx[2], length.out = grid_n_u),
+    b2 = seq(qy[1], qy[2], length.out = grid_n_u)
   )
   mask_hull <- inside_hull(gridB_full$b1, gridB_full$b2, hpoly)
   
@@ -2803,27 +2766,31 @@ geom <- build_geometry(Base_A)
 pc_scores_base <- data.frame(
   participant_id = ids_base,
   b1 = Base[, 1], b2 = Base[, 2],
-  cluster = as.integer(clF),
+  cluster = if (exists("clF")) as.integer(clF) else rep(NA_integer_, length(ids_base)),
   target = as.integer(y_use),
   stringsAsFactors = FALSE
 )
 write_csv(pc_scores_base, "pc_scores_base_b1b2.csv")
 
-pc_scores_residual <- data.frame(
-  participant_id = ids_base,
-  Bprime,
-  cluster = as.integer(clF),
-  stringsAsFactors = FALSE
-)
-write_csv(pc_scores_residual, "pc_scores_residual_Bprime.csv")
+if (exists("Bprime") && exists("clF")) {
+  pc_scores_residual <- data.frame(
+    participant_id = ids_base,
+    Bprime,
+    cluster = as.integer(clF),
+    stringsAsFactors = FALSE
+  )
+  write_csv(pc_scores_residual, "pc_scores_residual_Bprime.csv")
+}
 
-saveRDS(list(
-  participant_id = ids_base, 
-  XR = E_scaled, 
-  Fprime = Fprime
-),
-file = "Fprime_matrix.rds"
-)
+if (exists("E_scaled") && exists("Fprime")) {
+  saveRDS(list(
+    participant_id = ids_base,
+    XR = E_scaled,
+    Fprime = Fprime
+  ),
+  file = "Fprime_matrix.rds"
+  )
+}
 
 # Export Weights and Maps
 w_tbl <- data.frame(
@@ -2853,7 +2820,7 @@ saveRDS(list(
   ),
   folds = list(
     target = fold_id,
-    fibre = folds_f
+    fibre = if (exists("folds_f")) folds_f else NULL
   ),
   data_quality = list(
     constant_profile_n = if (is.null(degenerate_constant_profiles)) 0L else nrow(degenerate_constant_profiles),
@@ -3351,6 +3318,6 @@ saveRDS(list(
   weights = w_full,
   item_component_correlations = item_component_correlations_base,
   weighting_mode = WEIGHTING_MODE,
-  decomp_method = BASE_DECOMP_METHOD
+  decomp_method = BASE_DECOMP_METHOD,
+  residual_diagnostics_run = isTRUE(RUN_RESIDUAL_DIAGNOSTICS)
 ), file = "method_sensitivity_fit_bundle.rds")
-}

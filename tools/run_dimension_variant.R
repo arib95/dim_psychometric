@@ -86,15 +86,29 @@ run_dimension_variant_main <- function(cfg = default_run_cfg) {
   BASE_DECOMP_METHOD <- cfg$decomp_method
   PSY_CSV <- psych_csv
   DIAG_CSV <- diag_csv
-  if (!is.null(cfg$optimisation_subsample_n)) N_ROWS_SUB <- as.integer(cfg$optimisation_subsample_n)
-  if (!is.null(cfg$optimisation_w_min)) W_MIN <- as.numeric(cfg$optimisation_w_min)
-  if (!is.null(cfg$optimisation_multi_runs)) GOWER_MULTI_RUNS <- as.integer(cfg$optimisation_multi_runs)
-  if (!is.null(cfg$optimisation_multi_min_prop)) GOWER_MULTI_MIN_PROP <- as.numeric(cfg$optimisation_multi_min_prop)
-  if (!is.null(cfg$optimisation_step_grid)) W_STEP_GRID <- as.numeric(cfg$optimisation_step_grid)
-  if (!is.null(cfg$optimisation_batch_k)) W_BATCH_K <- as.integer(cfg$optimisation_batch_k)
-  if (!is.null(cfg$optimisation_batch_factor)) W_BATCH_FACTOR <- as.numeric(cfg$optimisation_batch_factor)
-  if (!is.null(cfg$optimisation_max_iter)) W_MAX_ITERS <- as.integer(cfg$optimisation_max_iter)
-  if (!is.null(cfg$optimisation_eval_per_iter)) W_EVAL_PER_ITER <- as.integer(cfg$optimisation_eval_per_iter)
+  integer_overrides <- c(
+    optimisation_subsample_n = "N_ROWS_SUB",
+    optimisation_multi_runs = "GOWER_MULTI_RUNS",
+    optimisation_batch_k = "W_BATCH_K",
+    optimisation_max_iter = "W_MAX_ITERS",
+    optimisation_eval_per_iter = "W_EVAL_PER_ITER"
+  )
+  numeric_overrides <- c(
+    optimisation_w_min = "W_MIN",
+    optimisation_multi_min_prop = "GOWER_MULTI_MIN_PROP",
+    optimisation_step_grid = "W_STEP_GRID",
+    optimisation_batch_factor = "W_BATCH_FACTOR"
+  )
+  for (nm in names(integer_overrides)) {
+    if (!is.null(cfg[[nm]])) {
+      assign(integer_overrides[[nm]], as.integer(cfg[[nm]]), envir = environment())
+    }
+  }
+  for (nm in names(numeric_overrides)) {
+    if (!is.null(cfg[[nm]])) {
+      assign(numeric_overrides[[nm]], as.numeric(cfg[[nm]]), envir = environment())
+    }
+  }
   RUN_RESIDUAL_DIAGNOSTICS <- isTRUE(cfg$run_residual_diagnostics)
   dir.create(OUTPUTS_DIR, recursive = TRUE, showWarnings = FALSE)
 

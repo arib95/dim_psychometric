@@ -158,47 +158,30 @@ map_with_progress <- function(X,
     worker_dots
   }
   
-  if (!parallel) {
-    if (!show_progress) {
-      out <- vector("list", length(X))
-      for (i in seq_along(X)) {
-        out[[i]] <- do.call(FUN, c(list(X[[i]]), make_worker_dots()))
-        if (isTRUE(progress_at_end) && !is.null(progress_callback)) progress_callback()
-      }
-      return(out)
+  run_sequential <- function() {
+    if (show_progress) {
+      pb <- utils::txtProgressBar(min = 0, max = length(X), style = 3)
+      on.exit(try(close(pb), silent = TRUE), add = TRUE)
     }
-    pb <- utils::txtProgressBar(min = 0, max = length(X), style = 3)
-    on.exit(try(close(pb), silent = TRUE), add = TRUE)
+
     out <- vector("list", length(X))
     for (i in seq_along(X)) {
       out[[i]] <- do.call(FUN, c(list(X[[i]]), make_worker_dots()))
       if (isTRUE(progress_at_end) && !is.null(progress_callback)) progress_callback()
-      if (isTRUE(progress_at_end)) utils::setTxtProgressBar(pb, i)
+      if (show_progress && isTRUE(progress_at_end)) utils::setTxtProgressBar(pb, i)
     }
-    return(out)
+    out
   }
-  
+
+  if (!parallel) {
+    return(run_sequential())
+  }
+
   nworkers <- future_worker_count()
   if (nworkers <= 1L) {
-    if (!show_progress) {
-      out <- vector("list", length(X))
-      for (i in seq_along(X)) {
-        out[[i]] <- do.call(FUN, c(list(X[[i]]), make_worker_dots()))
-        if (isTRUE(progress_at_end) && !is.null(progress_callback)) progress_callback()
-      }
-      return(out)
-    }
-    pb <- utils::txtProgressBar(min = 0, max = length(X), style = 3)
-    on.exit(try(close(pb), silent = TRUE), add = TRUE)
-    out <- vector("list", length(X))
-    for (i in seq_along(X)) {
-      out[[i]] <- do.call(FUN, c(list(X[[i]]), make_worker_dots()))
-      if (isTRUE(progress_at_end) && !is.null(progress_callback)) progress_callback()
-      if (isTRUE(progress_at_end)) utils::setTxtProgressBar(pb, i)
-    }
-    return(out)
+    return(run_sequential())
   }
-  
+
   worker_dots <- .drop_future_args(dots)
   future_scheduling <- dots$future.scheduling %||% cfg$future_scheduling %||% 1L
   future_packages <- dots$future.packages %||% NULL
@@ -389,23 +372,25 @@ make_ns_cache <- function(Xdf, type_list) {
   gower_opt_make_ns_cache(Xdf, type = type_list, gower_fun = gower_dist)
 }
 
-calc_id_from_cache <- function(num, den, n_rows) {
-  twonn_id_from_dist(gower_opt_dist_from_num_den(num, den, n_rows))
-}
-
-optimise_item_weights <- function(X,
-                                  n_rows_sub = 800L,
-                                  w_min = 0.05,
-                                  step_grid = c(0.95, 0.90, 0.75, 0.50, 0.25, 0.10, 0.05),
-                                  batch_k = 3L,
-                                  batch_factor = 0.75,
-                                  max_iter = 200L,
-                                  eval_per_iter = 50L,
-                                  seed = 42L) {
+run_item_weight_search <- function(X,
+                                   row_idx,
+                                   n_rows_sub = 800L,
+                                   w_min = 0.05,
+                                   step_grid = c(0.95, 0.90, 0.75, 0.50, 0.25, 0.10, 0.05),
+                                   batch_k = 3L,
+                                   batch_factor = 0.75,
+                                   max_iter = 200L,
+                                   eval_per_iter = 50L,
+                                   seed = 42L) {
   set.seed(seed)
-  row_pool <- seq_len(nrow(X))
-  n_sub <- min(as.integer(n_rows_sub), length(row_pool))
-  idx_sub <- if (length(row_pool) > n_sub) sample(row_pool, n_sub) else row_pool
+  row_idx <- as.integer(row_idx)
+  row_idx <- row_idx[is.finite(row_idx)]
+
+  n_sub <- suppressWarnings(as.integer(n_rows_sub))
+  if (!is.finite(n_sub) || n_sub < 1L) n_sub <- length(row_idx)
+  n_sub <- min(n_sub, length(row_idx))
+
+  idx_sub <- if (length(row_idx) > n_sub) sample(row_idx, n_sub) else row_idx
   prep <- prep_ord_gower(X[idx_sub, , drop = FALSE])
   cache <- make_ns_cache(prep$X, prep$type)
   vars <- names(prep$X)
@@ -435,6 +420,29 @@ optimise_item_weights <- function(X,
   )
   
   list(weights = opt$weights, history = hist, twonn_id = opt$final_ID, idx_sub = idx_sub)
+}
+
+optimise_item_weights <- function(X,
+                                  n_rows_sub = 800L,
+                                  w_min = 0.05,
+                                  step_grid = c(0.95, 0.90, 0.75, 0.50, 0.25, 0.10, 0.05),
+                                  batch_k = 3L,
+                                  batch_factor = 0.75,
+                                  max_iter = 200L,
+                                  eval_per_iter = 50L,
+                                  seed = 42L) {
+  run_item_weight_search(
+    X = X,
+    row_idx = seq_len(nrow(X)),
+    n_rows_sub = n_rows_sub,
+    w_min = w_min,
+    step_grid = step_grid,
+    batch_k = batch_k,
+    batch_factor = batch_factor,
+    max_iter = max_iter,
+    eval_per_iter = eval_per_iter,
+    seed = seed
+  )
 }
 
 knee_select_items <- function(weights,
@@ -672,21 +680,6 @@ fit_fixed_selection_from_prepared <- function(X_std_all,
     X_std_all = X_std_all,
     selected_items = selected_available,
     item_weights = weight_vec,
-    decomp_method = decomp_method,
-    spectrum_rank = spectrum_rank
-  )
-}
-
-fit_fixed_selection_from_raw <- function(X_raw,
-                                         selected_items,
-                                         item_weights,
-                                         decomp_method,
-                                         spectrum_rank) {
-  prep <- prepare_standardised_matrix(X_raw)
-  fit_fixed_selection_from_prepared(
-    X_std_all = prep$std,
-    selected_items = selected_items,
-    item_weights = item_weights,
     decomp_method = decomp_method,
     spectrum_rank = spectrum_rank
   )
@@ -948,80 +941,18 @@ optimise_item_weights_indexed <- function(X_raw,
                                           max_iter = 200L,
                                           eval_per_iter = 50L,
                                           seed = 42L) {
-  set.seed(seed)
-  
-  row_idx <- as.integer(row_idx)
-  row_idx <- row_idx[is.finite(row_idx)]
-  
-  n_sub <- suppressWarnings(as.integer(n_rows_sub))
-  if (!is.finite(n_sub) || n_sub < 1L) n_sub <- length(row_idx)
-  n_sub <- min(n_sub, length(row_idx))
-  
-  idx_sub <- if (length(row_idx) > n_sub) sample(row_idx, n_sub) else row_idx
-  
-  prep <- prep_ord_gower(X_raw[idx_sub, , drop = FALSE])
-  cache <- make_ns_cache(prep$X, prep$type)
-  vars <- names(prep$X)
-  
-  opt <- gower_opt_stochastic_weights(
-    cache = cache,
-    vars = vars,
-    init_weights = setNames(rep(1, length(vars)), vars),
-    allow_update = rep(TRUE, length(vars)),
-    id_fun = twonn_id_from_dist,
+  run_item_weight_search(
+    X = X_raw,
+    row_idx = row_idx,
+    n_rows_sub = n_rows_sub,
     w_min = w_min,
     step_grid = step_grid,
     batch_k = batch_k,
     batch_factor = batch_factor,
     max_iter = max_iter,
     eval_per_iter = eval_per_iter,
-    verbose = FALSE,
-    n_rows = cache$n
+    seed = seed
   )
-  
-  hist <- tibble::as_tibble(opt$history)
-  hist <- dplyr::transmute(
-    hist,
-    iter = iter,
-    twonn_id = ID,
-    changed = dplyr::if_else(iter == 0L, "START", changed),
-    weight = suppressWarnings(as.numeric(note))
-  )
-  
-  list(
-    weights = opt$weights,
-    history = hist,
-    twonn_id = opt$final_ID,
-    idx_sub = idx_sub
-  )
-}
-
-optimise_item_weights_indexed_worker <- function(task, half_tasks, X_raw, worker_cfg) {
-  limit_worker_threads()
-  
-  ht <- half_tasks[[task$half_id]]
-  side_offset <- if (identical(ht$side, "b")) 2000L else 1000L
-  seed_r <- as.integer(worker_cfg$seed) +
-    100000L * as.integer(ht$rep) +
-    side_offset +
-    as.integer(task$run)
-  
-  out <- optimise_item_weights_indexed(
-    X_raw = X_raw,
-    row_idx = ht$idx,
-    n_rows_sub = worker_cfg$optimisation_subsample_n,
-    w_min = worker_cfg$optimisation_w_min,
-    step_grid = worker_cfg$optimisation_step_grid,
-    batch_k = worker_cfg$optimisation_batch_k,
-    batch_factor = worker_cfg$optimisation_batch_factor,
-    max_iter = worker_cfg$optimisation_max_iter,
-    eval_per_iter = worker_cfg$optimisation_eval_per_iter,
-    seed = seed_r
-  )
-  
-  out$half_id <- task$half_id
-  out$run <- task$run
-  out
 }
 
 optimise_split_half_side_opt_list <- function(X_raw,
@@ -1052,9 +983,7 @@ optimise_split_half_side_opt_list <- function(X_raw,
       eval_per_iter = worker_cfg$optimisation_eval_per_iter,
       seed = seed_r
     )
-    # Split-half stability never reads optimiser histories or subsample indices.
-    # Returning only weights avoids shipping hundreds of large history tibbles
-    # back from multisession workers on macOS/RStudio.
+    # Workers only need weights here; histories make parallel returns much larger.
     out[[r]] <- list(weights = opt$weights)
     if (is.function(progress_fun)) progress_fun()
   }
@@ -1170,18 +1099,7 @@ split_half_id_guided_full_refit_worker <- function(task,
   )
   
   if (is.null(fit_a) || is.null(fit_b)) {
-    return(tibble::tibble(
-      rep = task$rep,
-      axis_corr_mean = NA_real_,
-      item_rmse = NA_real_,
-      scale_regression_vector_cosine = NA_real_,
-      n_anchor_items = NA_integer_,
-      selection_jaccard = NA_real_,
-      aligned_weight_correlation = NA_real_,
-      n_selected_a = NA_integer_,
-      n_selected_b = NA_integer_,
-      n_selected_intersection = NA_integer_
-    ))
+    return(empty_stability_row(task$rep))
   }
   
   geom_metrics <- geometry_stability_metrics(
@@ -1330,171 +1248,32 @@ leave_one_scale_out_prediction_worker <- function(j,
   )
 }
 
-materialise_split_half_task <- function(task, X_raw, scale_scores) {
-  if (!is.null(task$Xa_raw)) return(task)
-  
-  list(
-    rep = task$rep,
-    Xa_raw = X_raw[task$idx_a, , drop = FALSE],
-    Xb_raw = X_raw[task$idx_b, , drop = FALSE],
-    scale_scores_a = scale_scores[task$idx_a, , drop = FALSE],
-    scale_scores_b = scale_scores[task$idx_b, , drop = FALSE]
+empty_stability_row <- function(rep,
+                                selection = TRUE,
+                                n_fixed_items_used = NULL) {
+  out <- tibble::tibble(
+    rep = rep,
+    axis_corr_mean = NA_real_,
+    item_rmse = NA_real_,
+    scale_regression_vector_cosine = NA_real_,
+    n_anchor_items = NA_integer_
   )
-}
-
-make_split_half_half_tasks <- function(tasks) {
-  out <- vector("list", length(tasks) * 2L)
-  k <- 1L
-  
-  for (i in seq_along(tasks)) {
-    out[[k]] <- list(
-      half_id = k,
-      split_id = i,
-      rep = tasks[[i]]$rep,
-      side = "a",
-      idx = tasks[[i]]$idx_a
+  if (!is.null(n_fixed_items_used)) {
+    out$n_fixed_items_used <- n_fixed_items_used
+  }
+  if (isTRUE(selection)) {
+    out <- dplyr::bind_cols(
+      out,
+      tibble::tibble(
+        selection_jaccard = NA_real_,
+        aligned_weight_correlation = NA_real_,
+        n_selected_a = NA_integer_,
+        n_selected_b = NA_integer_,
+        n_selected_intersection = NA_integer_
+      )
     )
-    k <- k + 1L
-    
-    out[[k]] <- list(
-      half_id = k,
-      split_id = i,
-      rep = tasks[[i]]$rep,
-      side = "b",
-      idx = tasks[[i]]$idx_b
-    )
-    k <- k + 1L
   }
-  
   out
-}
-
-make_split_half_optimisation_tasks <- function(half_tasks, optimisation_runs) {
-  out <- vector("list", length(half_tasks) * optimisation_runs)
-  k <- 1L
-  
-  for (h in seq_along(half_tasks)) {
-    for (r in seq_len(optimisation_runs)) {
-      out[[k]] <- list(half_id = h, run = r)
-      k <- k + 1L
-    }
-  }
-  
-  out
-}
-
-fit_id_guided_from_opt_list <- function(X_std_all, decomp_method, cfg, opt_list) {
-  if (!length(opt_list)) stop("Empty id-guided optimisation list.")
-  
-  if (length(opt_list) > 1L) {
-    opt <- opt_list[[1L]]
-    combined <- combine_multi_run_weights(opt_list, cfg)
-    
-    selected_items <- intersect(combined$selected_items, colnames(X_std_all))
-    
-    weights <- setNames(rep(0, ncol(X_std_all)), colnames(X_std_all))
-    nm <- intersect(names(combined$weights), colnames(X_std_all))
-    weights[nm] <- combined$weights[nm]
-    
-    history <- opt$history
-    multi_run_summary <- combined
-  } else {
-    opt <- opt_list[[1L]]
-    selected <- knee_select_items(opt$weights, w_min = cfg$optimisation_w_min)
-    
-    selected_items <- intersect(selected$survivors, colnames(X_std_all))
-    
-    weights <- setNames(rep(cfg$optimisation_w_min, ncol(X_std_all)), colnames(X_std_all))
-    nm <- intersect(names(opt$weights), colnames(X_std_all))
-    weights[nm] <- opt$weights[nm]
-    
-    history <- opt$history
-    multi_run_summary <- NULL
-  }
-  
-  fit <- fit_component_solution(
-    X_std_all = X_std_all,
-    selected_items = selected_items,
-    item_weights = weights,
-    decomp_method = decomp_method,
-    spectrum_rank = cfg$spectrum_rank
-  )
-  
-  fit$history <- history
-  fit$weighting_mode <- "id_guided"
-  fit$decomp_method <- decomp_method
-  fit$method <- method_label("id_guided", decomp_method)
-  fit$multi_run_summary <- multi_run_summary
-  fit
-}
-
-split_half_id_guided_refit_from_optimisations <- function(task,
-                                                          split_id,
-                                                          X_raw,
-                                                          scale_scores,
-                                                          decomp_method,
-                                                          cfg,
-                                                          opt_by_half) {
-  half_id_a <- as.character((2L * split_id) - 1L)
-  half_id_b <- as.character(2L * split_id)
-  
-  Xa_raw <- X_raw[task$idx_a, , drop = FALSE]
-  Xb_raw <- X_raw[task$idx_b, , drop = FALSE]
-  
-  prep_a <- prepare_standardised_matrix(Xa_raw)
-  prep_b <- prepare_standardised_matrix(Xb_raw)
-  
-  common_items <- intersect(colnames(prep_a$std), colnames(prep_b$std))
-  
-  Xa_std <- prep_a$std[, common_items, drop = FALSE]
-  Xb_std <- prep_b$std[, common_items, drop = FALSE]
-  
-  fit_a <- tryCatch(
-    fit_id_guided_from_opt_list(
-      X_std_all = Xa_std,
-      decomp_method = decomp_method,
-      cfg = cfg,
-      opt_list = opt_by_half[[half_id_a]]
-    ),
-    error = function(e) NULL
-  )
-  
-  fit_b <- tryCatch(
-    fit_id_guided_from_opt_list(
-      X_std_all = Xb_std,
-      decomp_method = decomp_method,
-      cfg = cfg,
-      opt_list = opt_by_half[[half_id_b]]
-    ),
-    error = function(e) NULL
-  )
-  
-  if (is.null(fit_a) || is.null(fit_b)) {
-    return(tibble::tibble(
-      rep = task$rep,
-      axis_corr_mean = NA_real_,
-      item_rmse = NA_real_,
-      scale_regression_vector_cosine = NA_real_,
-      n_anchor_items = NA_integer_,
-      selection_jaccard = NA_real_,
-      aligned_weight_correlation = NA_real_,
-      n_selected_a = NA_integer_,
-      n_selected_b = NA_integer_,
-      n_selected_intersection = NA_integer_
-    ))
-  }
-  
-  geom_metrics <- geometry_stability_metrics(
-    fit_a = fit_a,
-    fit_b = fit_b,
-    scale_scores_a = scale_scores[task$idx_a, , drop = FALSE],
-    scale_scores_b = scale_scores[task$idx_b, , drop = FALSE],
-    anchor_items = common_items
-  )
-  
-  sel_metrics <- selection_stability_metrics(fit_a, fit_b)
-  
-  dplyr::bind_cols(tibble::tibble(rep = task$rep), geom_metrics, sel_metrics)
 }
 
 split_half_full_pipeline_refit_worker <- function(b,
@@ -1537,18 +1316,7 @@ split_half_full_pipeline_refit_worker <- function(b,
   )
   
   if (is.null(fit_a) || is.null(fit_b)) {
-    return(tibble::tibble(
-      rep = b$rep,
-      axis_corr_mean = NA_real_,
-      item_rmse = NA_real_,
-      scale_regression_vector_cosine = NA_real_,
-      n_anchor_items = NA_integer_,
-      selection_jaccard = NA_real_,
-      aligned_weight_correlation = NA_real_,
-      n_selected_a = NA_integer_,
-      n_selected_b = NA_integer_,
-      n_selected_intersection = NA_integer_
-    ))
+    return(empty_stability_row(b$rep))
   }
   
   geom_metrics <- geometry_stability_metrics(
@@ -1612,12 +1380,9 @@ split_half_fixed_selection_worker <- function(b,
   )
   
   if (is.null(fit_a) || is.null(fit_b)) {
-    return(tibble::tibble(
-      rep = b$rep,
-      axis_corr_mean = NA_real_,
-      item_rmse = NA_real_,
-      scale_regression_vector_cosine = NA_real_,
-      n_anchor_items = NA_integer_,
+    return(empty_stability_row(
+      b$rep,
+      selection = FALSE,
       n_fixed_items_used = length(common_selected)
     ))
   }
@@ -1908,20 +1673,6 @@ split_half_fixed_selection_stability <- function(X_raw,
     future.scheduling = cfg$future_scheduling %||% 1L
   )
   dplyr::bind_rows(rows)
-}
-
-split_half_stability <- function(X_raw,
-                                 scale_scores,
-                                 weighting_mode,
-                                 decomp_method,
-                                 cfg) {
-  split_half_full_pipeline_refit_stability(
-    X_raw = X_raw,
-    scale_scores = scale_scores,
-    weighting_mode = weighting_mode,
-    decomp_method = decomp_method,
-    cfg = cfg
-  )
 }
 
 scale_prediction_for_method <- function(method,
@@ -2244,12 +1995,6 @@ add_pareto_labels <- function(data, y_col = "pc12_explained_variance_ratio") {
     seed = 42,
     show.legend = FALSE
   )
-}
-
-normalise_bundle_method <- function(decomp_method) {
-  decomp_method <- tolower(decomp_method)
-  if (identical(decomp_method, "robust_pca")) return("robpca")
-  decomp_method
 }
 
 load_fit_bundle <- function(path, weighting_mode, decomp_method) {

@@ -11,12 +11,6 @@ suppressPackageStartupMessages({
 
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0L || is.na(x)) y else x
 
-required_packages <- c("readr", "dplyr", "tidyr", "ggplot2", "scales")
-missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
-if (length(missing_packages)) {
-  stop("Install required packages before running this script: ", paste(missing_packages, collapse = ", "))
-}
-
 parse_args <- function(args = commandArgs(trailingOnly = TRUE)) {
   cfg <- list(
     results_dir = NULL,
